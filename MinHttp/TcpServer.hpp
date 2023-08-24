@@ -12,7 +12,7 @@
 #include <pthread.h>
 
 /* 定义默认端口号：说明：如果采用云服务器，若对外界开放访问，需要在 安全组 中开放端口号！ */
-#define PORT 8080
+// #define PORT 8080
 #define BACKLOG 5
 
 /* 单例化设计 */
@@ -21,7 +21,11 @@ class TcpServer
 private:
     static TcpServer* Tcptr;
 private:
-    TcpServer(const uint16_t port = PORT)
+    // 【第一次修改】将端口号的设定放置在 httpServer 层传入
+    // 此处不再指定端口号【模拟HTTP协议中的默认设定端口号】
+    // TcpServer(const uint16_t port = PORT)
+    TcpServer(const uint16_t port)
+
         : _port(port), _listensock(-1)
     {
     }
@@ -80,7 +84,7 @@ public:
         local.sin_addr.s_addr = INADDR_ANY;     
         
         // 绑定
-        if(bind(_listensock, (struct sockaddr*)&local, sizeof(local) < 0)){
+        if(bind(_listensock, (struct sockaddr*)&local, sizeof(local) )< 0){
             exit(2);
         }
         // 到此为止，绑定成功！
@@ -93,6 +97,11 @@ public:
             exit(3);
         }
         // 到此为止，启动监听（处于监听态）！
+    }
+
+    /* 提供获取套接字结构 */
+    int GetSock(){
+        return _listensock;
     }
 
 
