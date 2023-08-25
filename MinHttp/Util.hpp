@@ -10,7 +10,7 @@
 class Util
 {
 public:
-    /* 对报头信息按行读取 */
+    /* 对报文信息按行读取 */
     /**
      * 参数：
      *  std::string &out：输出型参数，向外返回解析出来的内容
@@ -65,4 +65,19 @@ public:
         }
         return out.size();
     }
+
+
+    /* 对报头属性进行 { key : value } 格式处理 */
+    static bool CutString(const std::string &target, std::string &sub1_out, std::string &sub2_out, std::string sep){
+        size_t pos = target.find(sep);
+        if(pos != std::string::npos){
+            // 存在指定的分隔字符
+            sub1_out = target.substr(0,pos);
+            sub2_out = target.substr(pos+sep.size());
+            return true;
+        }
+        return false;
+    }    
+
+
 };
