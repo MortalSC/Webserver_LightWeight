@@ -11,7 +11,8 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-
+#include <fcntl.h>
+#include <sys/sendfile.h>
 #include "Util.hpp"
 #include "Log.hpp"
 
@@ -20,13 +21,48 @@
  */
 
 // #define DEBUG
+#define HTTP_VERSION "HTTP/1.0"
 #define WEB_ROOT "./wwwroot" // 服务器资源指定根目录
 #define DEFAUTL_PAGE "index.html"
+#define LINE_END "\r\n"
 
 #define SEP ": "
 #define DEFAULT_STATUS_CODE 0
 #define OK 200
 #define NOT_FOUND 404
+
+static std::string Code2Desc(int code)
+{
+    std::string desc;
+    switch (code)
+    {
+    case 200:
+        desc = "OK";
+        break;
+    case 404:
+        desc = "Not Found";
+        break;
+    default:
+        break;
+    }
+    return desc;
+}
+
+static std::string Suffix2Desc(const std::string& suffix){
+    static std::unordered_map<std::string, std::string> suffix2desc = {
+        {".html", "text/html"},
+        {".css", "text/css"},
+        {".js", "application/x-javascript"},
+        {".jpg", "image/jpeg"},
+        {".xml", "application/xml"}
+    };
+    auto iter = suffix2desc.find(suffix);
+    if(iter != suffix2desc.end()){
+        // 找到了
+        return iter->second;
+    }
+    return "text/html";
+}
 
 /* 请求 */
 class HttpRequest
@@ -49,8 +85,10 @@ public:
 
     bool cgi; // cgi 标志位
 
+    std::string suffix; // 资源后缀名
+
 public:
-    HttpRequest() : content_length(OK), cgi(false) {}
+    HttpRequest() : content_length(0), cgi(false) {}
     ~HttpRequest() {}
 };
 
@@ -59,13 +97,16 @@ class HttpResponse
 {
 public:
     std::string Status_line;            // 记录响应状态行信息
-    std::vector<std::string> Resq_head; // 记录响应报头信息
+    std::vector<std::string> Resp_head; // 记录响应报头信息
     std::string blank;                  // 空行
-    std::string Resq_body;              // 记录响应正文
+    std::string Resp_body;              // 记录响应正文
 
-    int status_code; // 响应状态码
+    int Status_code; // 响应状态码
+
+    int fd;       // 记录暂时打开的读取目标文件（资源）
+    int filesize; // 被访问的目标资源（文件）大小
 public:
-    HttpResponse() : status_code(0) {}
+    HttpResponse() : blank(LINE_END), Status_code(OK), fd(-1), filesize(0) {}
     ~HttpResponse() {}
 };
 
@@ -97,17 +138,56 @@ public:
 
     // }
 
-    int ProcessNonCIG(){
-        return 0;
+    // 构建响应
+    int ProcessNonCIG(int filesize)
+    {
+        // 响应的正文内容提取方式
+        // 从一个文件描述符中把数据考到另一个中
+        // 打开指定的资源文件
+        response.fd = open(request.path.c_str(), O_RDONLY);
+        // 当且仅当文件是有效的才进行构建响应
+
+        if (response.fd >= 0)
+        {
+
+            // 构建响应行
+            response.Status_line = HTTP_VERSION;
+            response.Status_line += " ";
+            response.Status_line += std::to_string(response.Status_code);
+            response.Status_line += " ";
+            response.Status_line += Code2Desc(response.Status_code);
+            response.Status_line += LINE_END;
+            response.filesize = filesize;
+
+            // 构建响应报头【主要是：正文大小和正文类型】
+
+            std::string header_line = "Content-Type: ";
+            header_line += Suffix2Desc(request.suffix);
+            header_line += LINE_END;
+            response.Resp_head.push_back(header_line);
+
+            header_line = "Content-Length: ";
+            header_line += std::to_string(response.filesize);
+            header_line += LINE_END;
+            response.Resp_head.push_back(header_line);
+
+
+            return OK;
+        }
+        return 404;
     }
 
-    /* 构建响应 */
+    /* 构建响应(判断请求调用构造响应) */
     void BuildHttpResponse()
     {
         // 请求合法性判断！【此处目前只处理 POST 和 GET】
         // 非法则返回特定响应
-        auto &code = response.status_code;
+        auto &code = response.Status_code;
         std::string _path;
+        // 判断路径存在性！
+        struct stat st; //
+        int size = 0;
+        std::size_t found = 0;
         if (request.method != "POST" && request.method != "GET")
         {
             // 请求非法
@@ -132,14 +212,15 @@ public:
                 request.path = request.uri;
             }
         }
-        else if(request.method == "POST")
+        else if (request.method == "POST")
         {
             // POST
             request.cgi = true;
-        }else{
+        }
+        else
+        {
             // 其他请求方式
         }
-
 
         // 拼接服务器指定的资源根目录
         _path = request.path;
@@ -151,9 +232,7 @@ public:
             request.path += DEFAUTL_PAGE;
         }
 
-        // 判断路径存在性！
-        struct stat st;
-        if (stat(request.path.c_str(), &st) == 0)
+        if (stat(request.path.c_str(), &st) == 0) // 此处获取不一定成功
         {
             // 获取成功！资源存在！
             // 判断是否为目录（未指定访问的资源）
@@ -161,44 +240,75 @@ public:
             {
                 request.path += "/";
                 request.path += DEFAUTL_PAGE;
+                stat(request.path.c_str(), &st); // 再次获取 【有效】请求资源的信息！
             }
             // 访问的是一个文件【如果是一个可执行程序，需要单独处理】
             // 判断文件可执行性
             if ((st.st_mode & S_IXUSR) || (st.st_mode & S_IXGRP) || (st.st_mode & S_IXOTH))
             {
                 request.cgi = true;
-
             }
+            size = st.st_size; // 记录文件大小（被访问资源）
         }
         else
         {
             // 获取失败！资源不存在！
             std::string info = request.path;
-            info += "Not Fount !";
+            info += " Not Fount";
             LogMessage(WARNING, info);
             code = NOT_FOUND;
             goto END;
         }
 
-        if(request.cgi){
-            // 以 cgi 的方式处理请求
-            // ProcessCIG();
-        }else{
-            // 非 cgi 的方式就是进行简单的网页文本返回（返回静态页面）
-            // ProcessNonCIG();
-
+        // 判断资源后缀！
+        found = request.path.rfind(".");
+        if (found == std::string::npos)
+        {
+            request.suffix = ".html";
+        }
+        else
+        {
+            request.suffix = request.path.substr(found);
         }
 
-        std::cout << "Debug : " << request.path << std::endl;
+        if (request.cgi)
+        {
+            // 以 cgi 的方式处理请求
+            // ProcessCIG();
+        }
+        else
+        {
+            // 到此位置目标网页一定存在！
+            // 返回的不单单是网页，还有构建响应！
+            // 非 cgi 的方式就是进行简单的网页文本返回（返回静态页面）
+            code = ProcessNonCIG(size);
+        }
+
         // LogMessage(INFO, request.uri);
         // LogMessage(INFO, request.path);
         // LogMessage(INFO, request.query_string);
     END:
+        std::cout << "Debug : " << request.path << std::endl;
+        if (code != OK)
+        {
+        }
         return;
     }
 
     /* 发送响应 */
-    void SendHttpResquese() {}
+    void SendHttpResquese()
+    {
+        // 底层实际是把数据拷贝到发送缓冲区中！
+        // 发送响应行信息
+        send(_sock, response.Status_line.c_str(), response.Status_line.size(), 0);
+        for (auto iter : response.Resp_head)
+        {
+            send(_sock, iter.c_str(), iter.size(), 0);
+        }
+        send(_sock, response.blank.c_str(), response.blank.size(), 0);
+        sendfile(_sock, response.fd, nullptr, response.filesize);
+        close(response.fd);
+    }
 
     ~EndPoint() {}
 
@@ -240,8 +350,8 @@ private:
         auto &line = request.Req_line;
         std::stringstream ss(line);
         ss >> request.method >> request.uri >> request.version;
-        auto& method = request.method;
-        std::transform(method.begin(), method.end(),method.begin(), ::toupper);
+        auto &method = request.method;
+        std::transform(method.begin(), method.end(), method.begin(), ::toupper);
         // LogMessage(INFO, request.method);
         // LogMessage(INFO, request.uri);
         // LogMessage(INFO, request.version);
