@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/sendfile.h>
 #include "Util.hpp"
@@ -48,16 +49,17 @@ static std::string Code2Desc(int code)
     return desc;
 }
 
-static std::string Suffix2Desc(const std::string& suffix){
+static std::string Suffix2Desc(const std::string &suffix)
+{
     static std::unordered_map<std::string, std::string> suffix2desc = {
         {".html", "text/html"},
         {".css", "text/css"},
         {".js", "application/x-javascript"},
         {".jpg", "image/jpeg"},
-        {".xml", "application/xml"}
-    };
+        {".xml", "application/xml"}};
     auto iter = suffix2desc.find(suffix);
-    if(iter != suffix2desc.end()){
+    if (iter != suffix2desc.end())
+    {
         // 找到了
         return iter->second;
     }
@@ -84,7 +86,7 @@ public:
     std::string query_string; // 含参url中的参数串
 
     bool cgi; // cgi 标志位
-
+    int size;
     std::string suffix; // 资源后缀名
 
 public:
@@ -171,10 +173,123 @@ public:
             header_line += LINE_END;
             response.Resp_head.push_back(header_line);
 
-
             return OK;
         }
         return 404;
+    }
+
+    int ProcessCIG()
+    {
+        // 获取可执行程序
+        auto &bin = request.path; // 需要子进程执行的目标程序！一定存在！（前面的操作已经保证！）
+
+        // 数据来源
+
+        auto &method = request.method;
+        auto &query_string = request.query_string; // GET：
+        auto &body_text = request.Req_body;        // POST：
+        int content_length = request.content_length;
+
+        // 对于Get方法可以使用环境变量的方式传递数据
+        // 环境变量是具有全局属性的(可以被子进程继承下去)；不受exec*程序替换的影响!
+        std::string query_string_env;
+        std::string method_env;
+        std::string content_length_env;
+
+        // 使用管道通信：约定站在父进程角度！
+        int input[2];  // 子 => 父：新数据
+        int output[2]; // 父 => 子：原始数据
+
+        if (pipe(input) < 0)
+        {
+            // 创建失败
+            LogMessage(ERROR, "pipe input error ...");
+            return 404;
+        }
+        if (pipe(output) < 0)
+        {
+            // 创建失败
+            LogMessage(ERROR, "pipe output error ...");
+
+            return 404;
+        }
+
+        // 在被调用是实际走到这得就是一个新线程！【从头到尾都只有一个进程！（httpserver）】
+        // 目的调用：CGI程序！
+        pid_t sub = fork();
+        if (sub > 0)
+        {
+            // 1. 通信信道建立
+            // 父进程
+            // 父进程把数据给子进程（output），关闭读
+            // 父进程从子进程获取返回数据（input），关闭写
+            close(output[0]);
+            close(input[1]);
+
+            if ("POST" == method)
+            {
+                const char *start = body_text.c_str(); // C 风格指向字符串
+                int total = 0;
+                int size = 0;
+                while (total < content_length && (size = write(output[1], start + total, body_text.size() - total)) > 0)
+                {
+                    total += size;
+                }
+            }
+
+            waitpid(sub, nullptr, 0);
+            close(input[0]);
+            close(output[1]);
+        }
+        else if (sub == 0)
+        {
+            // 1. 通信信道建立
+            // 子进程：用于调用CGI程序处理数据
+            // 父进程把数据给子进程（output），关闭读【子进程关闭写】
+            // 父进程从子进程获取返回数据（input），关闭写【子进程关闭读】
+            close(output[1]);
+            close(input[0]);
+
+            // 难点：程序替换后！文件描述符的值就不知道了！（数据替换了）但是曾经打开的管道文件依旧存在！
+            // 程序替换值替换代码和数据，不会替换内核相关的数据结构（包括文件描述符表）
+            // 解决方式：设定约定：让目标被替换后的进程，读取管道等价于读取标准输入、写入管道等价于写到标准输出
+            // 这些需要在程序替换前作重定向操作！！！
+
+            method_env = "METHOD=";
+            method_env += method;
+            putenv((char *)method_env.c_str());
+
+            if ("GET" == method)
+            {
+                query_string_env = "QUERY_STRING=";
+                query_string_env += query_string;
+                putenv((char *)query_string_env.c_str());
+            }
+            else if(method == "POST"){
+                content_length_env = "CONTENT_LENGTH=";
+                content_length_env += std::to_string(content_length);
+                putenv((char *)content_length_env.c_str());
+                LogMessage(INFO, "POST METHOD, ADD CONTENT_LENGTH");
+            }else{
+                // Nothing to do
+            }
+
+            // 子进程角度
+            // input[1]：写入数据
+            // output[0]：读取数据（从父进程来）
+            dup2(input[1], 1);  // 子进程向外输出
+            dup2(output[0], 0); // 向子进程输入
+
+            execl(bin.c_str(), bin.c_str(), nullptr);
+            exit(1); // 如果失败
+        }
+        else
+        {
+            // 失败！
+            LogMessage(ERROR, "fork error");
+            return 404;
+        }
+        return OK;
     }
 
     /* 构建响应(判断请求调用构造响应) */
@@ -216,6 +331,7 @@ public:
         {
             // POST
             request.cgi = true;
+            request.path = request.uri;
         }
         else
         {
@@ -248,7 +364,7 @@ public:
             {
                 request.cgi = true;
             }
-            size = st.st_size; // 记录文件大小（被访问资源）
+            request.size = st.st_size; // 记录文件大小（被访问资源）
         }
         else
         {
@@ -274,7 +390,7 @@ public:
         if (request.cgi)
         {
             // 以 cgi 的方式处理请求
-            // ProcessCIG();
+            ProcessCIG();
         }
         else
         {
