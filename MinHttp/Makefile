@@ -12,7 +12,7 @@ $(bin):$(src)
 	$(cc) -o $@ $^ $(LD_FLAGS)
 
 $(cgi):cgi/cgi.cc
-	$(cc) -o $@ $^ 
+	$(cc) -o $@ $^ -std=c++11
 
 .PHONY:output
 output:
