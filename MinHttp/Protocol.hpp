@@ -26,11 +26,14 @@
 #define WEB_ROOT "./wwwroot" // 服务器资源指定根目录
 #define DEFAUTL_PAGE "index.html"
 #define LINE_END "\r\n"
+#define PAGE_404 "404.html"
 
 #define SEP ": "
 #define DEFAULT_STATUS_CODE 0
 #define OK 200
+#define BAD_REQUSET 400
 #define NOT_FOUND 404
+#define SERVER_ERROR 500
 
 static std::string Code2Desc(int code)
 {
@@ -105,10 +108,10 @@ public:
 
     int Status_code; // 响应状态码
 
-    int fd;       // 记录暂时打开的读取目标文件（资源）
-    int filesize; // 被访问的目标资源（文件）大小
+    int fd; // 记录暂时打开的读取目标文件（资源）
+    // int filesize; // 被访问的目标资源（文件）大小
 public:
-    HttpResponse() : blank(LINE_END), Status_code(OK), fd(-1), filesize(0) {}
+    HttpResponse() : blank(LINE_END), Status_code(OK), fd(-1) {}
     ~HttpResponse() {}
 };
 
@@ -120,28 +123,28 @@ class EndPoint
 {
 public:
     EndPoint(int sock)
-        : _sock(sock)
+        : _sock(sock), stop(false)
     {
     }
+
+    bool IsStop() { return stop; }
 
     /* 读取请求 */
     void RecvHttpRequest()
     {
-        GetRequestLine();       // 读取请求行
-        GetRequestHead();       // 读取请求报头
-        ParseHttpRequestLine(); // 解析请求行
-        ParseHttpRequestHead(); // 解析请求报头属性
-        RecvHttpRequestBody();  // （若存在）读取请求正文
+        // || 逻辑或具有短路请求的作用！
+        // if (GetRequestLine() || GetRequestHead())
+        if ((!GetRequestLine()) && (!GetRequestHead()))
+        {
+            // 进入到这说明读取没有出错！【否则就是错误】
+            ParseHttpRequestLine(); // 解析请求行
+            ParseHttpRequestHead(); // 解析请求报头属性
+            RecvHttpRequestBody();  // （若存在）读取请求正文
+        }
     }
 
-    // /* 分析 / 解析 请求 */
-    // void ParseHttpRequest()
-    // {
-
-    // }
-
     // 构建响应
-    int ProcessNonCIG(int filesize)
+    int ProcessNonCIG()
     {
         // 响应的正文内容提取方式
         // 从一个文件描述符中把数据考到另一个中
@@ -151,44 +154,48 @@ public:
 
         if (response.fd >= 0)
         {
+#if 0
+            // // 构建响应行
+            // response.Status_line = HTTP_VERSION;
+            // response.Status_line += " ";
+            // response.Status_line += std::to_string(response.Status_code);
+            // response.Status_line += " ";
+            // response.Status_line += Code2Desc(response.Status_code);
+            // response.Status_line += LINE_END;
 
-            // 构建响应行
-            response.Status_line = HTTP_VERSION;
-            response.Status_line += " ";
-            response.Status_line += std::to_string(response.Status_code);
-            response.Status_line += " ";
-            response.Status_line += Code2Desc(response.Status_code);
-            response.Status_line += LINE_END;
-            response.filesize = filesize;
+            // // 构建响应报头【主要是：正文大小和正文类型】
 
-            // 构建响应报头【主要是：正文大小和正文类型】
+            // std::string header_line = "Content-Type: ";
+            // header_line += Suffix2Desc(request.suffix);
+            // header_line += LINE_END;
+            // response.Resp_head.push_back(header_line);
 
-            std::string header_line = "Content-Type: ";
-            header_line += Suffix2Desc(request.suffix);
-            header_line += LINE_END;
-            response.Resp_head.push_back(header_line);
-
-            header_line = "Content-Length: ";
-            header_line += std::to_string(response.filesize);
-            header_line += LINE_END;
-            response.Resp_head.push_back(header_line);
-
+            // header_line = "Content-Length: ";
+            // header_line += std::to_string(response.filesize);
+            // header_line += LINE_END;
+            // response.Resp_head.push_back(header_line);
+#endif
             return OK;
         }
-        return 404;
+        return NOT_FOUND;
     }
 
+    // 关联 CGI 程序处理数据
     int ProcessCIG()
     {
         // 获取可执行程序
         auto &bin = request.path; // 需要子进程执行的目标程序！一定存在！（前面的操作已经保证！）
-
+        int code = OK;
         // 数据来源
+        // std::cout << request.Req_body << std::endl;
+        /* 修复bug过程的输出 */
+        // LogMessage(INFO, request.Req_body);
 
         auto &method = request.method;
         auto &query_string = request.query_string; // GET：
         auto &body_text = request.Req_body;        // POST：
         int content_length = request.content_length;
+        auto &response_body = response.Resp_body;
 
         // 对于Get方法可以使用环境变量的方式传递数据
         // 环境变量是具有全局属性的(可以被子进程继承下去)；不受exec*程序替换的影响!
@@ -204,20 +211,21 @@ public:
         {
             // 创建失败
             LogMessage(ERROR, "pipe input error ...");
-            return 404;
+            code = SERVER_ERROR;
+            return code;
         }
         if (pipe(output) < 0)
         {
             // 创建失败
             LogMessage(ERROR, "pipe output error ...");
-
-            return 404;
+            code = SERVER_ERROR;
+            return code;
         }
 
         // 在被调用是实际走到这得就是一个新线程！【从头到尾都只有一个进程！（httpserver）】
         // 目的调用：CGI程序！
-        pid_t sub = fork();
-        if (sub > 0)
+        pid_t pid = fork();
+        if (pid > 0)
         {
             // 1. 通信信道建立
             // 父进程
@@ -225,23 +233,66 @@ public:
             // 父进程从子进程获取返回数据（input），关闭写
             close(output[0]);
             close(input[1]);
+            std::cout << std::endl;
+            /* 修复bug过程的输出 */
+            // LogMessage(INFO, request.Req_body);
+            // LogMessage(INFO, body_text);
 
-            if ("POST" == method)
+            if (method == "POST")
             {
-                const char *start = body_text.c_str(); // C 风格指向字符串
+                /* 修复bug过程的输出 */
+                // LogMessage(INFO, request.Req_body);
+                // LogMessage(INFO, body_text);
+                const char *start = body_text.c_str();
                 int total = 0;
                 int size = 0;
+                std::cout << *start << std::endl;
+                std::cout << body_text << std::endl;
+                /* 修复bug过程的输出 */
+                // LogMessage(INFO, request.Req_body);
+                // LogMessage(INFO, body_text);
+
                 while (total < content_length && (size = write(output[1], start + total, body_text.size() - total)) > 0)
                 {
                     total += size;
                 }
+                std::cout << body_text << std::endl;
             }
 
-            waitpid(sub, nullptr, 0);
+            // 父进程获取子进程的处理结果！
+            char ch = 0;
+            while (read(input[0], &ch, 1) > 0)
+            {
+                response_body.push_back(ch);
+            }
+
+            // 检测子进程是否成功退出
+            int status = 0;
+            pid_t ret = waitpid(pid, &status, 0);
+            if (ret == pid)
+            {
+                // 等待成功！
+                if (WIFEXITED(status))
+                {
+                    if (WEXITSTATUS(status) == 0)
+                    {
+                        code = OK;
+                    }
+                    else
+                    {
+                        code = BAD_REQUSET;
+                    }
+                }
+                else
+                {
+                    code = SERVER_ERROR;
+                }
+            }
+
             close(input[0]);
             close(output[1]);
         }
-        else if (sub == 0)
+        else if (pid == 0)
         {
             // 1. 通信信道建立
             // 子进程：用于调用CGI程序处理数据
@@ -265,12 +316,15 @@ public:
                 query_string_env += query_string;
                 putenv((char *)query_string_env.c_str());
             }
-            else if(method == "POST"){
+            else if (method == "POST")
+            {
                 content_length_env = "CONTENT_LENGTH=";
                 content_length_env += std::to_string(content_length);
                 putenv((char *)content_length_env.c_str());
                 LogMessage(INFO, "POST METHOD, ADD CONTENT_LENGTH");
-            }else{
+            }
+            else
+            {
                 // Nothing to do
             }
 
@@ -289,12 +343,15 @@ public:
             LogMessage(ERROR, "fork error");
             return 404;
         }
-        return OK;
+        return code;
     }
 
     /* 构建响应(判断请求调用构造响应) */
     void BuildHttpResponse()
     {
+
+        // 到此请求已经处理完成！实际就可以构建响应了！【该函数主要处理的关于响应正文内容产生问题】
+
         // 请求合法性判断！【此处目前只处理 POST 和 GET】
         // 非法则返回特定响应
         auto &code = response.Status_code;
@@ -307,7 +364,7 @@ public:
         {
             // 请求非法
             LogMessage(WARNING, "Requesting method is not right ...");
-            code = NOT_FOUND;
+            code = BAD_REQUSET;
             goto END;
         }
         if (request.method == "GET")
@@ -369,9 +426,7 @@ public:
         else
         {
             // 获取失败！资源不存在！
-            std::string info = request.path;
-            info += " Not Fount";
-            LogMessage(WARNING, info);
+            LogMessage(WARNING, request.path + " Not Found");
             code = NOT_FOUND;
             goto END;
         }
@@ -390,24 +445,23 @@ public:
         if (request.cgi)
         {
             // 以 cgi 的方式处理请求
-            ProcessCIG();
+            code = ProcessCIG(); // 执行目标程序，拿到结果放置在response.Resp_body
         }
         else
         {
             // 到此位置目标网页一定存在！
             // 返回的不单单是网页，还有构建响应！
             // 非 cgi 的方式就是进行简单的网页文本返回（返回静态页面）
-            code = ProcessNonCIG(size);
+            code = ProcessNonCIG(); // 只需要返回静态网页即可
         }
 
         // LogMessage(INFO, request.uri);
         // LogMessage(INFO, request.path);
         // LogMessage(INFO, request.query_string);
     END:
-        std::cout << "Debug : " << request.path << std::endl;
-        if (code != OK)
-        {
-        }
+        // std::cout << "Debug : " << request.path << std::endl;
+        BuildHttpResponseHelper(); // 完成状态行和响应报头的填充！
+
         return;
     }
 
@@ -422,31 +476,57 @@ public:
             send(_sock, iter.c_str(), iter.size(), 0);
         }
         send(_sock, response.blank.c_str(), response.blank.size(), 0);
-        sendfile(_sock, response.fd, nullptr, response.filesize);
-        close(response.fd);
+        if (request.cgi)
+        {
+            auto &response_body = response.Resp_body;
+            size_t size = 0;
+            size_t total = 0;
+            const char *start = response_body.c_str();
+            while (total < response_body.size() && (size = send(_sock, start + total, response_body.size() - total, 0) > 0))
+            {
+                total += size;
+            }
+        }
+        else
+        {
+            sendfile(_sock, response.fd, nullptr, request.size);
+            close(response.fd);
+        }
     }
 
     ~EndPoint() {}
 
 private:
     // 获取请求行信息
-    void GetRequestLine()
+    bool GetRequestLine()
     {
         // 读取请求行信息
         auto &line = request.Req_line;
-        Util::ReadInLine(_sock, request.Req_line);
-        line.resize(line.size() - 1); // 去掉尾部的 '\n'
-        LogMessage(INFO, request.Req_line);
+        if (Util::ReadInLine(_sock, request.Req_line) > 0)
+        {
+            // 正确解析请求行信息才进行后续操作！
+            line.resize(line.size() - 1); // 去掉尾部的 '\n'
+            LogMessage(INFO, request.Req_line);
+        }
+        else
+        {
+            stop = true;
+        }
     }
     // 获取报头信息
-    void GetRequestHead()
+    bool GetRequestHead()
     {
         // 获取报头内的全部信息
         std::string line;
         while (line != "\n")
         {
             line.clear();
-            Util::ReadInLine(_sock, line);
+            if (Util::ReadInLine(_sock, line) <= 0)
+            {
+                // 到此处说明对方发送的数据出错了
+                stop = true;
+                break;
+            }
             // 空行的获取
             if (line == "\n")
             {
@@ -455,8 +535,9 @@ private:
             }
             line.resize(line.size() - 1); // 去掉尾部的 '\n'
             request.Req_head.push_back(line);
-            // LogMessage(INFO, line);
+            LogMessage(INFO, line);
         }
+        return stop;
     }
 
     // 解析请求行数据
@@ -505,14 +586,18 @@ private:
     }
 
     // 读取报文中的正文内容
-    void RecvHttpRequestBody()
+    bool RecvHttpRequestBody()
     {
         if (IsNeedRecvHttpRequestBody())
         {
             int content_length = request.content_length;
             auto &body = request.Req_body;
+            /* 修复bug过程的输出 */
+            // LogMessage(INFO, request.Req_body);
+            // LogMessage(INFO, std::to_string(content_length));
+
             char ch = 0;
-            while (content_length--)
+            while (content_length)
             {
                 ssize_t s = recv(_sock, &ch, 1, 0);
                 if (s > 0)
@@ -523,9 +608,95 @@ private:
                 }
                 else
                 {
+                    stop = true;
                     break;
                 }
             }
+            // LogMessage(INFO, body);
+        }
+        return stop;
+    }
+
+    // 构建响应（出错处理）
+    void BuildHttpResponseHelper()
+    {
+        // 获取状态行内容
+        auto &code = response.Status_code;
+
+        // 构建状态行！
+        auto &status_line = response.Status_line;
+        status_line += HTTP_VERSION;
+        status_line += " ";
+        status_line += std::to_string(code);
+        status_line += " ";
+        status_line += Code2Desc(code);
+        status_line += LINE_END;
+
+        std::string page = WEB_ROOT;
+        page += "/";
+        // 响应正文（可能含有报头）
+        switch (code)
+        {
+        case OK:
+            BuildOkResponse();
+            break;
+        case NOT_FOUND:
+            page += PAGE_404;
+            HandlerError(page);
+            break;
+        case SERVER_ERROR:
+            page += PAGE_404;
+            HandlerError(page);
+            break;
+        case BAD_REQUSET:
+            page += PAGE_404;
+            HandlerError(page);
+            break;
+        default:
+            break;
+        }
+    }
+
+    // 200
+    void BuildOkResponse()
+    {
+        std::string line = "Content-Type: ";
+        line += Suffix2Desc(request.suffix);
+        line += LINE_END;
+        response.Resp_head.push_back(line);
+
+        line = "Content-Length: ";
+        if (request.cgi)
+        {
+            line += std::to_string(response.Resp_body.size()); //
+        }
+        else
+        {
+            line += std::to_string(request.size); //
+        }
+        line += LINE_END;
+        response.Resp_head.push_back(line);
+    }
+
+    // 404
+    void HandlerError(std::string page)
+    {
+        request.cgi = false;
+        // 返回对应的404页面！
+        response.fd = open(page.c_str(), O_RDONLY);
+        if (response.fd > 0)
+        {
+            struct stat st;
+            stat(page.c_str(), &st);
+            request.size = st.st_size;
+
+            std::string line = "Content-Type: text/html";
+            line += LINE_END;
+            response.Resp_head.push_back(line);
+            line = "Content-Length: ";
+            line += std::to_string(st.st_size);
+            line += LINE_END;
+            response.Resp_head.push_back(line);
         }
     }
 
@@ -533,9 +704,45 @@ private:
     int _sock;
     HttpRequest request;
     HttpResponse response;
+
+    bool stop; // 用于鉴别是否输入错误等问题
 };
 
 /* 请求与响应处理 */
+class CallBack
+{
+public:
+    CallBack() {}
+
+    void operator()(int sock){
+        HandlerRequest(sock);
+    }
+
+    void HandlerRequest(int sock)
+    {
+        /* http请求流程 */
+        EndPoint *ep = new EndPoint(sock);
+        ep->RecvHttpRequest(); // 接收请求，解析请求
+                               // ep->ParseHttpRequest();  //
+        if (!ep->IsStop())
+        {
+            LogMessage(INFO, "Recv No Error, Begin Build And Send ...");
+            ep->BuildHttpResponse(); // 构建响应
+            ep->SendHttpResquese();  // 发送响应
+        }
+        else
+        {
+            LogMessage(WARNING, "Recv Error ,Delete Build And Send ...");
+        }
+
+        LogMessage(INFO, "Handler request end ...");
+        delete ep;
+
+        close(sock);
+    }
+};
+
+#if 0
 class Entrence
 {
 public:
@@ -548,9 +755,17 @@ public:
         /* http请求流程 */
         EndPoint *ep = new EndPoint(sock);
         ep->RecvHttpRequest(); // 接收请求，解析请求
-        // ep->ParseHttpRequest();  //
-        ep->BuildHttpResponse(); // 构建响应
-        ep->SendHttpResquese();  // 发送响应
+                               // ep->ParseHttpRequest();  //
+        if (!ep->IsStop())
+        {
+            LogMessage(INFO, "Recv No Error, Begin Build And Send ...");
+            ep->BuildHttpResponse(); // 构建响应
+            ep->SendHttpResquese();  // 发送响应
+        }
+        else
+        {
+            LogMessage(WARNING, "Recv Error ,Delete Build And Send ...");
+        }
         delete ep;
 
 #ifdef DEBUG
@@ -575,3 +790,4 @@ public:
         return nullptr;
     }
 };
+#endif
