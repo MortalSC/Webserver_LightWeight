@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 /* 线程头文件 */
 #include <pthread.h>
+
 #include "Log.hpp"
 
 /* 定义默认端口号：说明：如果采用云服务器，若对外界开放访问，需要在 安全组 中开放端口号！ */
@@ -100,7 +101,6 @@ public:
         if (bind(_listensock, (struct sockaddr *)&local, sizeof(local)) < 0)
         {
             LogMessage(FATAL, "Bind socket error!");
-
             exit(2);
         }
         // 到此为止，绑定成功！
