@@ -1,39 +1,53 @@
 #include <iostream>
-#include <cstdlib>
-#include <string>
-#include <unistd.h>
-using namespace std;
+#include "comm.hpp"
 
 int main()
 {
-    cerr << "....................................................." << endl;
-    cerr << "====================>【method】 " << getenv("METHOD") << endl;
-    std::string method = getenv("METHOD");
     std::string query_string;
-    if ("GET" == method)
-    {
-        query_string = getenv("QUERY_STRING");
-        cerr << "====================>【args】 " << query_string << endl;
-    }
-    else if ("POST" == method)
-    {
-        cerr << "====================>【content-length】 " << getenv("CONTENT_LENGTH") << endl;
-        int content_length = atoi( getenv("CONTENT_LENGTH"));
-        char ch = 0;
-        while(content_length){
-            read(0, &ch, 1);
-            query_string.push_back(ch);
-            content_length--;
-        }
+    GetQueryString(query_string);
+    //a=100&b=200
+    
+    std::string str1;
+    std::string str2;
+    CutString(query_string, "&", str1, str2);
 
-        cerr << "Get text : " << query_string << endl;
-    }
-    else
-    {
-    }
-    cerr << "*****************************************************" << endl;
+    std::string name1;
+    std::string value1;
+    CutString(str1, "=", name1, value1);
 
-    // 业务型数据处理！
+    std::string name2;
+    std::string value2;
+    CutString(str2, "=", name2, value2);
 
+    //1 -> 
+    std::cout << name1 << " : " << value1 << std::endl;
+    std::cout << name2 << " : " << value2 << std::endl;
+
+    //2
+    std::cerr << name1 << " : " << value1 << std::endl;
+    std::cerr << name2 << " : " << value2 << std::endl;
+    int x = atoi(value1.c_str());
+    int y = atoi(value2.c_str());
+
+    //可能向进行某种计算(计算，搜索，登陆等)，想进行某种存储(注册)
+    std::cout << "<html>";
+    std::cout << "<head><meta charset=\"utf-8\"></head>";
+    std::cout << "<body>";
+    std::cout << "<h3> " << value1 << " + " << value2 << " = "<< x+y << "</h3>";
+    std::cout << "<h3> " << value1 << " - " << value2 << " = "<< x-y << "</h3>";
+    std::cout << "<h3> " << value1 << " * " << value2 << " = "<< x*y << "</h3>";
+    std::cout << "<h3> " << value1 << " / " << value2 << " = "<< x/y << "</h3>";
+    std::cout << "</body>";
+    std::cout << "</html>";
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
