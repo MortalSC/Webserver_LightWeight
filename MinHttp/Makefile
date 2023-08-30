@@ -20,6 +20,7 @@ output:
 	cp $(bin) output
 	cp -rf wwwroot output
 	cp $(cgi) output/wwwroot
+	cp ./cgi/shell_cgi.sh output/wwwroot
 
 .PHONY:clean
 clean:
